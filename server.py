@@ -6,7 +6,7 @@ ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
 from fastapi import FastAPI, APIRouter, HTTPException, Request, Depends
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, EmailStr
@@ -240,5 +240,9 @@ app.include_router(api_router)
 app.add_middleware(CORSMiddleware, allow_credentials=True,
     allow_origins=[o for o in [os.environ.get("FRONTEND_URL")] if o] or ["http://localhost:8000"],
     allow_methods=["*"], allow_headers=["*"])
-# Frontend servido pelo próprio backend (mesma origem, sem CORS). Deve ficar por último.
-app.mount("/", StaticFiles(directory=ROOT_DIR / "static", html=True), name="static")
+# Frontend servido pelo próprio backend (mesma origem, sem CORS).
+INDEX = ROOT_DIR / "index.html"
+if not INDEX.exists(): INDEX = ROOT_DIR / "static" / "index.html"
+
+@app.get("/", include_in_schema=False)
+async def index(): return FileResponse(INDEX)
