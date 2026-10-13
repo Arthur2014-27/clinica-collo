@@ -12,13 +12,17 @@ from pydantic import BaseModel, EmailStr
 from typing import Optional
 from datetime import datetime, timezone, timedelta
 from urllib.parse import urlsplit, urlunsplit
-import logging, bcrypt, jwt, asyncpg
+import logging, bcrypt, jwt, asyncpg, httpx
 
 DATABASE_URL = os.environ['DATABASE_URL']
 JWT_SECRET = os.environ['JWT_SECRET']
 JWT_ALGORITHM = "HS256"
 EMERGENT_LLM_KEY = os.environ.get('EMERGENT_LLM_KEY')
 ANTHROPIC_API_KEY = os.environ.get('ANTHROPIC_API_KEY')
+GROQ_API_KEY = os.environ.get('GROQ_API_KEY')
+GROQ_MODELS = [m.strip() for m in os.environ.get('GROQ_MODELS', 'openai/gpt-oss-120b,openai/gpt-oss-20b').split(',') if m.strip()]
+FALLBACK_REPLY = ('Olá! Recebemos sua mensagem. Para agendar sua consulta, nos envie seu nome completo, '
+                  'telefone e o melhor horário. A recepção confirmará os detalhes em breve.')
 AI_MODEL = os.environ.get('AI_MODEL', 'claude-sonnet-5-5')
 
 logging.basicConfig(level=logging.INFO)
@@ -113,7 +117,7 @@ async def logout(): return {"ok": True}
 @api_router.get("/auth/me")
 async def me(user=Depends(get_current_user)): return user
 
-# ---- IA (Claude) ----
+# ---- IA ----
 AI_SYSTEM = (
     "Você é a atendente virtual da recepção da Clínica de Psicologia Carolina Collo. "
     "Fale sempre em português do Brasil, com tom acolhedor e profissional. "
@@ -122,7 +126,28 @@ AI_SYSTEM = (
     "Seja breve e gentil."
 )
 
+async def ask_groq(prompt: str):
+    # Cada modelo tem limite próprio no Groq: se um estourar, tenta o próximo.
+    last = None
+    async with httpx.AsyncClient(timeout=30) as http:
+        for model in GROQ_MODELS:
+            try:
+                r = await http.post("https://api.groq.com/openai/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
+                    json={"model": model, "max_tokens": 800, "temperature": 0.5,
+                          "messages": [{"role": "system", "content": AI_SYSTEM},
+                                       {"role": "user", "content": prompt}]})
+                if r.status_code != 200:
+                    last = f"{model}: HTTP {r.status_code} {r.text[:200]}"; log.warning("Groq falhou: %s", last); continue
+                text = (r.json()["choices"][0]["message"].get("content") or "").strip()
+                if text: return text
+                last = f"{model}: resposta vazia"
+            except Exception as e:
+                last = f"{model}: {e}"; log.warning("Groq erro: %s", last)
+    raise RuntimeError(last or "Groq sem modelos configurados")
+
 async def ask_llm(prompt: str, session_id: str):
+    if GROQ_API_KEY: return await ask_groq(prompt)
     if ANTHROPIC_API_KEY:
         from anthropic import AsyncAnthropic
         c = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
@@ -142,7 +167,7 @@ async def generate_ai_reply(pid: int):
     try:
         reply = await ask_llm(f"Histórico:\n{convo}\n\nResponda a última mensagem.", f"recep-{pid}")
     except Exception as e:
-        log.error("Falha na IA: %s", e); return None
+        log.error("Falha na IA: %s", e); reply = FALLBACK_REPLY
     if not reply: return None
     reply = reply.strip()
     r = await pool.fetchrow("INSERT INTO messages(patient_id,sender,text,read_by_reception) VALUES($1,'ai',$2,true) RETURNING *", pid, reply)
