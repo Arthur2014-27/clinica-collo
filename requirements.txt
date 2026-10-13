@@ -5,6 +5,7 @@ asyncpg
 pydantic[email]
 bcrypt
 pyjwt
+httpx
 python-dotenv
 anthropic
 emergentintegrations
